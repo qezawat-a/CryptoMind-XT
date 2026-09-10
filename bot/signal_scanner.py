@@ -1,0 +1,251 @@
+import time
+import logging
+import pandas as pd
+from bot.xt_client import XTClient, XTError
+from bot.strategies import StrategyEngine
+from bot.memory import LongTermMemory
+from config import Config
+
+logger = logging.getLogger("xt_scanner")
+
+# XT kline field names. Per XT docs: "a" is Volume, "v" is Turnover.
+KLINE_FIELDS = {
+    "t": "timestamp", "o": "open", "h": "high", "l": "low", "c": "close",
+    "a": "volume", "v": "turnover", "s": "symbol",
+}
+
+VALID_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w"]
+
+TF_WEIGHTS = {"1m": 0.5, "3m": 0.8, "5m": 1.0, "15m": 1.5, "30m": 2.0,
+              "1h": 2.5, "2h": 2.8, "4h": 3.0, "1d": 4.0, "1w": 5.0}
+
+
+class SignalScanner:
+    def __init__(self, xt_client: XTClient, memory: LongTermMemory):
+        self.xt = xt_client
+        self.memory = memory
+        self.engine = StrategyEngine()
+
+    def fetch_klines(self, symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
+        try:
+            rows = self.xt.get_klines(symbol, interval, limit=min(limit, 1500))
+        except XTError as e:
+            logger.warning(f"Kline fetch failed for {symbol} {interval}: {e}")
+            return pd.DataFrame()
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows).rename(columns=KLINE_FIELDS)
+        for col in ["open", "high", "low", "close", "volume", "turnover", "timestamp"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        required = ["open", "high", "low", "close"]
+        if any(c not in df.columns for c in required):
+            logger.warning(f"Kline response missing OHLC columns: {list(df.columns)}")
+            return pd.DataFrame()
+        df = df.dropna(subset=required)
+        if "volume" not in df.columns:
+            df["volume"] = 0.0
+        # XT returns newest-first; strategies assume oldest-first.
+        if "timestamp" in df.columns:
+            df = df.sort_values("timestamp")
+        df = df.reset_index(drop=True)
+        # Drop the still-forming (live) last candle: indicators must only see
+        # CLOSED candles. A forming candle repaints every scan - a cross on it
+        # can appear LONG and vanish at close, opening trades against the real
+        # trend (user sees SHORT on closed candles, bot acted on forming one).
+        df = self._drop_forming_candle(df, interval)
+        return df
+
+    @staticmethod
+    def _drop_forming_candle(df, interval: str):
+        """Remove last row if its candle window hasn't closed yet."""
+        try:
+            import time as _time
+            unit = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+            seconds = int(interval[:-1]) * unit.get(interval[-1:], 60)
+            last_ts = float(df["timestamp"].iloc[-1])
+            # XT sends ms; tolerate seconds just in case.
+            if last_ts < 1e12:
+                last_ts *= 1000
+            if _time.time() * 1000 < last_ts + seconds * 1000:
+                return df.iloc[:-1].reset_index(drop=True)
+        except Exception:
+            pass
+        return df
+
+    def get_current_price(self, symbol: str) -> float:
+        try:
+            data = self.xt.get_agg_ticker(symbol)
+            price = float(data.get("c") or 0)
+            if price > 0:
+                return price
+        except XTError as e:
+            logger.warning(f"agg-ticker failed for {symbol}: {e}")
+        try:
+            data = self.xt.get_mark_price(symbol)
+            return float(data.get("p") or 0)
+        except XTError as e:
+            logger.warning(f"mark-price failed for {symbol}: {e}")
+        return 0.0
+
+    def get_mark_price(self, symbol: str) -> float:
+        try:
+            return float(self.xt.get_mark_price(symbol).get("p") or 0)
+        except XTError:
+            return 0.0
+
+    def scan_single_timeframe(self, symbol: str, interval: str,
+                              min_confidence: int) -> dict:
+        df = self.fetch_klines(symbol, interval)
+        if df.empty or len(df) < 40:
+            return {"direction": "NEUTRAL", "confidence": 0, "all_signals": [],
+                    "strategies_used": [], "error": "insufficient_data"}
+        min_agree = int(self.memory.get_setting("min_agreeing_strategies",
+                                                Config.MIN_AGREEING_STRATEGIES))
+        return self.engine.get_consensus(df, min_confidence, min_agree)
+
+    def _resolve_intervals(self, intervals=None) -> list:
+        if intervals is None:
+            intervals = self.memory.get_setting("timeframes",
+                                                ",".join(Config.DEFAULT_TIMEFRAMES))
+        if isinstance(intervals, str):
+            intervals = intervals.split(",")
+        out = []
+        for tf in intervals:
+            tf = tf.strip().lower()
+            if tf in VALID_INTERVALS:
+                out.append(tf)
+            elif tf:
+                logger.warning(f"Dropping unsupported timeframe: {tf}")
+        return out or list(Config.DEFAULT_TIMEFRAMES)
+
+    def scan_multi_timeframe(self, symbol: str, intervals: list = None,
+                             min_confidence: int = None) -> dict:
+        if min_confidence is None:
+            min_confidence = int(self.memory.get_setting("min_confidence",
+                                                         Config.MIN_CONFIDENCE))
+        intervals = self._resolve_intervals(intervals)
+        tf_min_conf = int(self.memory.get_setting("tf_min_confidence", 60))
+
+        all_results = {}
+        long_weight = 0.0
+        short_weight = 0.0
+        voted_weight = 0.0
+        strategies_used = set()
+
+        for tf in intervals:
+            result = self.scan_single_timeframe(symbol, tf, tf_min_conf)
+            all_results[tf] = result
+            direction = result["direction"]
+            if direction == "NEUTRAL":
+                continue
+            # Only signal-producing timeframes contribute weight — NEUTRAL ones
+            # must not dilute the denominator, otherwise the agreement % wrongly
+            # drops when the market is choppy and most TFs return NEUTRAL.
+            weight = TF_WEIGHTS.get(tf, 1.0)
+            voted_weight += weight
+            contribution = weight * (result["confidence"] / 100.0)
+            if direction == "LONG":
+                long_weight += contribution
+            else:
+                short_weight += contribution
+            strategies_used.update(result.get("strategies_used", []))
+
+        overall = "NEUTRAL"
+        strength = 0.0
+        confidence = 0
+        # Confidence reflects DIRECTIONAL ALIGNMENT across timeframes (how much
+        # of the configured weight actually votes the winning way), scaled by
+        # the winning side's average confidence. A unanimous 4/4 signal reaches
+        # high confidence so the bot trades on a clearly-aligned trend; a split
+        # or choppy market (some TFs NEUTRAL/opposed) is pulled down in step.
+        # This replaces the old formula (confidence = strength * agreement),
+        # which multiplied two sub-unity factors and capped even perfect 4/4
+        # alignment near 77% -- so the bot almost never cleared the 80% bar.
+        if voted_weight > 0 and long_weight != short_weight:
+            if long_weight > short_weight:
+                overall = "LONG"
+                winner, loser = long_weight, short_weight
+            else:
+                overall = "SHORT"
+                winner, loser = short_weight, long_weight
+            strength = (winner - loser) / voted_weight
+            total_w = sum(TF_WEIGHTS.get(t, 1.0) for t in intervals)
+            aligned_w = sum(TF_WEIGHTS.get(t, 1.0) for t, r in all_results.items()
+                            if r.get("direction") == overall)
+            alignment = aligned_w / total_w if total_w else 0.0
+            win_conf = winner / voted_weight if voted_weight else 0.0
+            confidence = int(alignment * (60 + 40 * win_conf))
+
+        return {
+            "direction": overall,
+            "confidence": confidence,
+            "signal_strength": strength,
+            "strategies_used": sorted(strategies_used),
+            "timeframe_results": all_results,
+            "long_weight": long_weight,
+            "short_weight": short_weight,
+            "voted_weight": voted_weight,
+        }
+
+    def scan_and_report(self, symbol: str = None) -> dict:
+        if symbol is None:
+            symbol = self.memory.get_setting("symbol", Config.DEFAULT_SYMBOL)
+        min_conf = int(self.memory.get_setting("min_confidence", Config.MIN_CONFIDENCE))
+        intervals = self._resolve_intervals()
+        result = self.scan_multi_timeframe(symbol, intervals, min_conf)
+        result["price"] = self.get_current_price(symbol)
+        result["symbol"] = symbol
+        result["timestamp"] = time.time()
+        if result["direction"] != "NEUTRAL" and result["confidence"] >= min_conf:
+            # Skip recording if an identical signal was produced very recently
+            # to avoid flooding the DB with duplicates from consecutive scans.
+            recent = self.memory.get_recent_signals(symbol, limit=5)
+            now = time.time()
+            if not any(
+                (s["direction"] == result["direction"]
+                 and s["timeframe"] == ",".join(intervals)
+                 and now - float(s["timestamp"]) < 120)
+                for s in recent
+            ):
+                self.memory.record_signal(
+                    symbol=symbol, direction=result["direction"],
+                    strategy=",".join(result["strategies_used"]) or "MULTI",
+                    timeframe=",".join(intervals), confidence=result["confidence"],
+                    signal_strength=result["signal_strength"], price=result["price"],
+                )
+        return result
+
+    def format_signal_report(self, result: dict) -> str:
+        if "error" in result and "direction" not in result:
+            return f"Signal Scan Error: {result['error']}"
+        report = f"=== SIGNAL SCAN [{result.get('symbol', 'N/A')}] ===\n"
+        report += f"Direction: {result['direction']}\n"
+        report += f"Confidence: {result['confidence']}%\n"
+        report += f"Signal Strength: {result.get('signal_strength', 0):.2f}\n"
+        report += f"Price: {result.get('price', 0)}\n"
+        if result.get("strategies_used"):
+            report += f"Strategies: {', '.join(result['strategies_used'])}\n"
+        for tf, r in result.get("timeframe_results", {}).items():
+            if r.get("error"):
+                report += f"  {tf}: no data ({r['error']})\n"
+                continue
+            gate = int(self.memory.get_setting("tf_min_confidence", Config.TF_MIN_CONFIDENCE))
+            fired, below_gate = [], []
+            for s in r.get("all_signals", []):
+                if s["direction"] == "NEUTRAL":
+                    continue
+                entry = f"{s['strategy']}={s['direction']}({s['confidence']}%)"
+                (below_gate if s["confidence"] < gate else fired).append(entry)
+            parts = []
+            if fired:
+                parts.append(", ".join(fired))
+            if below_gate:
+                parts.append(f"below {gate}% gate: {', '.join(below_gate)}")
+            if not parts:
+                parts.append("no strategy fired")
+            report += f"  {tf}: {r['direction']} ({r['confidence']}%) [{' | '.join(parts)}]\n"
+        report += (f"\nLong: {result.get('long_weight', 0):.2f} | "
+                   f"Short: {result.get('short_weight', 0):.2f} | "
+                   f"Voted: {result.get('voted_weight', 0):.2f}")
+        return report
