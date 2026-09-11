@@ -231,20 +231,40 @@ class StrategyEngine:
         short_score = sum(r["confidence"] for r in short_signals)
         total_score = long_score + short_score
 
+        # RSI-FIRST: RSI has the first word. If it fires (>= min_confidence),
+        # its side alone decides - the opposite side is discarded even if 2+
+        # strategies agree against it. RSI needs no second vote.
+        rsi_vote = None
+        if (rsi_entry and rsi_entry.get("direction") in ("LONG", "SHORT")
+                and rsi_entry.get("confidence", 0) >= min_confidence):
+            rsi_vote = rsi_entry["direction"]
+            if rsi_vote == "LONG":
+                short_signals = []
+            else:
+                long_signals = []
+
         # Direction is decided by confidence mass, not signal count. With the
         # old count vote, SHORT(85) and LONG(66) tied 1:1 and the entire
         # timeframe was discarded as NEUTRAL despite a clear stronger side.
         #
-        # BUT a single strategy firing alone is no longer enough: one noisy
-        # indicator on one timeframe (e.g. MOMENTUM continuation on 1m noise)
-        # used to open trades by itself -> instant losses. Require min_agree
-        # strategies on the winning side before the timeframe votes at all.
-        if long_score > short_score and len(long_signals) >= min_agree:
+        # BUT (when RSI is silent) a single strategy firing alone is no longer
+        # enough: one noisy indicator on one timeframe (e.g. MOMENTUM
+        # continuation on 1m noise) used to open trades by itself ->
+        # instant losses. Require min_agree strategies on the winning side
+        # before the timeframe votes at all.
+        if rsi_vote == "LONG" and long_signals:
             direction = "LONG"
             strategies_used = [r["strategy"] for r in long_signals]
-        elif short_score > long_score and len(short_signals) >= min_agree:
+        elif rsi_vote == "SHORT" and short_signals:
             direction = "SHORT"
             strategies_used = [r["strategy"] for r in short_signals]
+        elif rsi_vote is None:
+            if long_score > short_score and len(long_signals) >= min_agree:
+                direction = "LONG"
+                strategies_used = [r["strategy"] for r in long_signals]
+            elif short_score > long_score and len(short_signals) >= min_agree:
+                direction = "SHORT"
+                strategies_used = [r["strategy"] for r in short_signals]
 
         if direction != "NEUTRAL" and total_score > 0:
             signal_strength = abs(long_score - short_score) / total_score

@@ -44,8 +44,17 @@ TOOLS = [
         }}
     },
     {
+        "name": "estimate_trade",
+        "description": "Calculate exact order size for a symbol WITHOUT placing any order. Returns contracts, notional in USDT, exchange minimum, and a YES/NO verdict. ALWAYS call this before deciding a trade is 'too small' - never guess from balance alone.",
+        "parameters": {"type": "object", "properties": {
+            "symbol": {"type": "string", "description": "e.g. saga_usdt (defaults to current symbol)"},
+            "direction": {"type": "string", "enum": ["LONG", "SHORT"], "description": "Trade direction"},
+            "leverage": {"type": "integer", "description": "Leverage 1-125 (defaults to setting)"},
+        }, "required": []}
+    },
+    {
         "name": "open_trade",
-        "description": "Open a futures trade. Only use when you have strong conviction after analyzing market. Size is calculated automatically from balance x margin% x leverage and checked against min notional inside. NEVER pre-reject a trade because wallet balance is below min notional - just call it and read the result.",
+        "description": "Open a futures trade. Only use when you have strong conviction after analyzing market. Size is calculated automatically from balance x margin% x leverage and checked against min notional inside. NEVER pre-reject a trade because wallet balance is below min notional - call estimate_trade for exact numbers, or just call open_trade and read the result.",
         "parameters": {"type": "object", "properties": {
             "direction": {"type": "string", "enum": ["LONG", "SHORT"], "description": "Trade direction"},
             "symbol": {"type": "string", "description": "e.g. btc_usdt (defaults to current symbol)"},
@@ -168,6 +177,7 @@ class AgentTools:
             "get_market_data": self._get_market_data,
             "scan_market": self._scan_market,
             "get_contract_info": self._get_contract_info,
+            "estimate_trade": self._estimate_trade,
             "open_trade": self._open_trade,
             "close_trade": self._close_trade,
             "close_all_trades": self._close_all_trades,
@@ -251,6 +261,39 @@ class AgentTools:
                     f"Price tick: {self.trader.risk.get_price_step(symbol)}")
         except Exception as e:
             return f"Contract info error for {symbol}: {e}"
+
+    def _estimate_trade(self, args: Dict) -> str:
+        """Dry-run sizing: exact numbers so the LLM never guesses wrong."""
+        symbol = (args.get("symbol") or self.memory.get_setting(
+            "symbol", self.Config.DEFAULT_SYMBOL)).lower()
+        direction = (args.get("direction") or "LONG").upper()
+        if direction not in ("LONG", "SHORT"):
+            return "Invalid direction, use LONG or SHORT"
+        try:
+            leverage = int(args.get("leverage") or self.memory.get_setting(
+                "leverage", self.Config.DEFAULT_LEVERAGE))
+        except (TypeError, ValueError):
+            leverage = self.Config.DEFAULT_LEVERAGE
+        try:
+            price = self.trader.scanner.get_current_price(symbol)
+            if price <= 0:
+                return f"No live price for {symbol}."
+            _, prov_sl = self.trader.position_mgr.calculate_dynamic_tpsl(
+                symbol, direction, price, 0.5, 80, leverage)
+            qty, mode, reason = self.trader.risk.calculate_position_size(
+                symbol, price, leverage, prov_sl, "MARKET")
+            notional = self.trader.risk.contracts_to_notional(symbol, qty, price)
+            min_n = self.trader.risk.get_min_notional(symbol)
+            bal = self.trader.risk.get_tradable_balance()
+            verdict = ("YES - call open_trade" if qty > 0
+                       else f"NO - {reason}")
+            return (f"{symbol} {direction} {leverage}x @ {price}\n"
+                    f"Tradable balance: {bal:.4f} USDT\n"
+                    f"Size: {qty} contracts ~= {notional:.2f} USDT "
+                    f"(exchange min {min_n} USDT)\n"
+                    f"Verdict: {verdict}")
+        except Exception as e:
+            return f"Estimate failed for {symbol}: {e}"
 
     def _open_trade(self, args: Dict) -> str:
         if self.Config.AGENT_DRY_RUN == "true":
