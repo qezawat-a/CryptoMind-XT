@@ -248,6 +248,8 @@ class SignalScanner:
             if r.get("error"):
                 report += f"  {tf}: no data ({r['error']})\n"
                 continue
+            rsi_txt = (f"RSI: {r['rsi']:.1f}" if r.get("rsi") is not None
+                       else "RSI: n/a")
             gate = int(self.memory.get_setting("tf_min_confidence", Config.TF_MIN_CONFIDENCE))
             fired, below_gate = [], []
             for s in r.get("all_signals", []):
@@ -262,7 +264,7 @@ class SignalScanner:
                 parts.append(f"below {gate}% gate: {', '.join(below_gate)}")
             if not parts:
                 parts.append("no strategy fired")
-            report += f"  {tf}: {r['direction']} ({r['confidence']}%) [{' | '.join(parts)}]\n"
+            report += f"  {tf}: {r['direction']} ({r['confidence']}%) [{rsi_txt} | {' | '.join(parts)}]\n"
         report += (f"\nLong: {result.get('long_weight', 0):.2f} | "
                    f"Short: {result.get('short_weight', 0):.2f} | "
                    f"Voted: {result.get('voted_weight', 0):.2f}")

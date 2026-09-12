@@ -134,7 +134,9 @@ class RSIStrategy(StrategyBase):
         elif curr_rsi > self.overbought:
             strength = min(100, (curr_rsi - self.overbought) * 2)
             return "SHORT", self._confidence(strength) - 10, {"rsi": curr_rsi}
-        return "NEUTRAL", 0, {}
+        # Mid-zone: silent, but ALWAYS pass the value through so every
+        # scan/report can display RSI next to each timeframe.
+        return "NEUTRAL", 0, {"rsi": curr_rsi}
 
     def _confidence(self, strength: float) -> int:
         return min(90, int(60 + strength * 1.5))
