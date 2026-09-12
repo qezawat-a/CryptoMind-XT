@@ -125,7 +125,8 @@ class SignalScanner:
             min_confidence = int(self.memory.get_setting("min_confidence",
                                                          Config.MIN_CONFIDENCE))
         intervals = self._resolve_intervals(intervals)
-        tf_min_conf = int(self.memory.get_setting("tf_min_confidence", 60))
+        tf_min_conf = int(self.memory.get_setting("tf_min_confidence",
+                                                  Config.TF_MIN_CONFIDENCE))
 
         all_results = {}
         long_weight = 0.0
