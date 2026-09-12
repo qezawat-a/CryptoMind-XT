@@ -192,6 +192,49 @@ class SignalScanner:
                            f"(fast reversal in progress)")
                 overall = "NEUTRAL"
 
+        # RSI-FORCE (user principle, FINAL word): any timeframe with an
+        # extreme RSI forces the OVERALL direction - even against all other
+        # timeframes and even after the 1m breaker. Among opposing extremes
+        # the winner is max(TF_weight * |rsi-50|). Confidence stays HONEST
+        # (low when overruled TFs oppose) so the 80 money gate still
+        # protects entries - only the DIRECTION is forced.
+        rsi_force = None
+        cands = []
+        for tf, r in all_results.items():
+            if r.get("direction") not in ("LONG", "SHORT"):
+                continue
+            # Candidate = this TF followed an RSI vote. The strategy's fired
+            # direction IS the extreme-state definition (a fresh cross-down
+            # fires SHORT at rsi 69.x - still an RSI regime TF). Thresholds
+            # live only in RSIStrategy; never re-derive them here.
+            sigs = r.get("all_signals", []) or []
+            rsi_sig = next((s for s in sigs if s.get("strategy") == "RSI"), None)
+            det = (rsi_sig.get("details", {}) or {}) if rsi_sig else {}
+            if (rsi_sig and rsi_sig.get("direction") == r["direction"]
+                    and det.get("rsi") is not None):
+                rv = float(det["rsi"])
+                cands.append((TF_WEIGHTS.get(tf, 1.0) * abs(rv - 50),
+                              tf, rv, r["direction"]))
+        if cands:
+            _, ftf, frsi, fside = max(cands)
+            if overall != fside:
+                prev = overall
+                overall = fside
+                total_w = sum(TF_WEIGHTS.get(t, 1.0) for t in intervals)
+                aligned_w = sum(TF_WEIGHTS.get(t, 1.0) for t, r in all_results.items()
+                                if r.get("direction") == fside)
+                fw = short_weight if fside == "SHORT" else long_weight
+                ow = long_weight if fside == "SHORT" else short_weight
+                win_conf = fw / voted_weight if voted_weight else 0.0
+                confidence = int((aligned_w / total_w) * (60 + 40 * win_conf)) if total_w else 0
+                strength = (fw - ow) / voted_weight if voted_weight else 0.0
+                # A veto against the superseded direction is stale - force
+                # is the final word. (1m opposition stays visible in its TF
+                # line + the honest confidence.)
+                veto_1m = None
+                rsi_force = (f"{ftf} RSI {frsi:.1f} {fside} overrules MTF "
+                             f"(was {prev})")
+
         return {
             "direction": overall,
             "confidence": confidence,
@@ -202,6 +245,7 @@ class SignalScanner:
             "short_weight": short_weight,
             "voted_weight": voted_weight,
             "veto_1m": veto_1m,
+            "rsi_force": rsi_force,
         }
 
     def scan_and_report(self, symbol: str = None) -> dict:
@@ -290,6 +334,8 @@ class SignalScanner:
         report = f"=== SIGNAL SCAN [{result.get('symbol', 'N/A')}] ===\n"
         if result.get("veto_1m"):
             report += f"VETO: {result['veto_1m']}\n"
+        if result.get("rsi_force"):
+            report += f"FORCE: {result['rsi_force']}\n"
         if result.get("veto_reason"):
             report += f"VETO: {result['veto_reason']}\n"
         tfs = result.get("timeframe_results", {})
