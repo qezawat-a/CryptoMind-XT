@@ -167,10 +167,11 @@ class AgentTools:
 
     def execute(self, name: str, args: Dict, allow_settings: bool = True) -> str:
         if not allow_settings and name in self.SETTINGS_TOOLS:
-            return (f"Tool {name} is disabled in autonomous mode: settings "
-                    f"(leverage/margin/symbol/cooldowns) can only be changed "
-                    f"by the user in chat, never by yourself. Continue trading "
-                    f"with current settings.")
+            return (f"Tool {name} is BLOCKED: the user did not ask for any "
+                    f"settings change. NEVER change leverage/margin/symbol/"
+                    f"timeframes/cooldowns on your own initiative. If you "
+                    f"believe a change is needed, propose it in words and ask "
+                    f"the user first. Continue with current settings.")
         handlers = {
             "get_status": self._get_status,
             "get_balance": self._get_balance,
@@ -214,11 +215,30 @@ class AgentTools:
             return f"Failed to read balance: {e}"
         if not item:
             return "No USDT balance returned."
-        return (f"Wallet: {item.get('walletBalance')} USDT\n"
-                f"Available: {item.get('availableBalance')} USDT\n"
-                f"Frozen: {item.get('openOrderMarginFrozen')} USDT\n"
-                f"Isolated: {item.get('isolatedMargin')} USDT\n"
-                f"Crossed: {item.get('crossedMargin')} USDT")
+        # Show the comparable number right away so the LLM never compares
+        # raw balance against min_notional (different things!):
+        # max_notional = tradable x margin% x leverage.
+        try:
+            wallet = float(item.get("walletBalance") or 0)
+            frozen = float(item.get("openOrderMarginFrozen") or 0)
+            tradable = max(0.0, wallet - frozen)
+            margin_pct = float(self.memory.get_setting(
+                "margin_amount_pct", self.Config.DEFAULT_MARGIN_AMOUNT_PCT))
+            leverage = int(self.memory.get_setting(
+                "leverage", self.Config.DEFAULT_LEVERAGE))
+            max_notional = tradable * (margin_pct / 100.0) * leverage
+            buying_line = (f"Max order notional you can open: "
+                           f"{tradable:.4f} x {margin_pct}% x {leverage}x = "
+                           f"{max_notional:.2f} USDT "
+                           f"(compare THIS to min_notional, never the raw balance)")
+        except Exception:
+            buying_line = ""
+        out = (f"Wallet: {item.get('walletBalance')} USDT\n"
+               f"Available: {item.get('availableBalance')} USDT\n"
+               f"Frozen: {item.get('openOrderMarginFrozen')} USDT\n"
+               f"Isolated: {item.get('isolatedMargin')} USDT\n"
+               f"Crossed: {item.get('crossedMargin')} USDT")
+        return out + (f"\n{buying_line}" if buying_line else "")
 
     def _get_market_data(self, args: Dict) -> str:
         symbol = args.get("symbol") or self.memory.get_setting("symbol", self.Config.DEFAULT_SYMBOL)
@@ -282,15 +302,28 @@ class AgentTools:
                 symbol, direction, price, 0.5, 80, leverage)
             qty, mode, reason = self.trader.risk.calculate_position_size(
                 symbol, price, leverage, prov_sl, "MARKET")
+            cs = self.trader.risk.get_contract_size(symbol)
             notional = self.trader.risk.contracts_to_notional(symbol, qty, price)
             min_n = self.trader.risk.get_min_notional(symbol)
             bal = self.trader.risk.get_tradable_balance()
+            try:
+                margin_pct = float(self.memory.get_setting(
+                    "margin_amount_pct", self.Config.DEFAULT_MARGIN_AMOUNT_PCT))
+            except (TypeError, ValueError):
+                margin_pct = float(self.Config.DEFAULT_MARGIN_AMOUNT_PCT)
             verdict = ("YES - call open_trade" if qty > 0
                        else f"NO - {reason}")
             return (f"{symbol} {direction} {leverage}x @ {price}\n"
-                    f"Tradable balance: {bal:.4f} USDT\n"
-                    f"Size: {qty} contracts ~= {notional:.2f} USDT "
-                    f"(exchange min {min_n} USDT)\n"
+                    f"MATH (step by step):\n"
+                    f"  1) margin money = {bal:.4f} x {margin_pct}% = "
+                    f"{bal * (margin_pct / 100.0):.4f} USDT\n"
+                    f"  2) order value = margin money x {leverage}x leverage\n"
+                    f"  3) contracts = order value / (price x contractSize) = "
+                    f"{qty} contracts\n"
+                    f"  4) notional = {qty} x {price} x {cs} = "
+                    f"{notional:.2f} USDT vs exchange min {min_n} USDT\n"
+                    f"RULE: compare ONLY step-4 notional to min_notional. "
+                    f"Raw balance ({bal:.4f}) is NEVER compared to min_notional.\n"
                     f"Verdict: {verdict}")
         except Exception as e:
             return f"Estimate failed for {symbol}: {e}"
@@ -340,7 +373,11 @@ class AgentTools:
                     pass
             low = result.lower()
             if "below minimum" in low or "computed size is 0" in low or "below exchange minimum" in low:
-                result += f"\n[HINT] Balance too low for {symbol}. Switch symbol or deposit. Try: set_symbol to btc_usdt with leverage 10 and margin 10%"
+                result += (f"\n[HINT] The sized ORDER (contracts x price x "
+                           f"contractSize) is below exchange minimum - this is "
+                           f"about order math, NOT raw balance. Call "
+                           f"estimate_trade to see exact numbers. Do NOT change "
+                           f"settings or demand deposits on your own.")
             if "max positions" in low or "already have an open" in low:
                 result += f"\n[HINT] Gate blocked: {result}. Check /status for open positions."
         finally:

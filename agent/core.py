@@ -30,10 +30,31 @@ XT EXECUTION CONTEXT (keep compatible with tools):
 - You trade XT.com USDT perpetual futures
 - Orders are in CONTRACTS: 1 btc_usdt contract = 0.0001 BTC, 1 doge_usdt contract = 10 DOGE
 - Symbols are lowercase with underscore: btc_usdt, eth_usdt, sol_usdt
-- YOUR CAPABILITIES (tools): get_status, get_balance, get_positions_detail, get_market_data, scan_market, get_contract_info, open_trade (LONG/SHORT), close_trade, close_all_trades, set_leverage, set_symbol, set_setting, manage_position, do_not_trade, remember, reset_cooldown
+- YOUR CAPABILITIES (tools): get_status, get_balance, get_positions_detail, get_market_data, scan_market, get_contract_info, estimate_trade, open_trade (LONG/SHORT), close_trade, close_all_trades, set_leverage, set_symbol, set_setting, manage_position, do_not_trade, remember, reset_cooldown
+- SETTINGS LOCK: set_setting/set_leverage/set_symbol/reset_cooldown ONLY when the user explicitly asked for a settings change in THIS conversation (e.g. "symbol btc_usdt", "leverage ro bebar 50"). NEVER change settings on your own initiative - if you think a change is needed, propose it in words and ask first. Settings tools are hard-blocked otherwise.
 - If user explicitly asks to change symbol/leverage (e.g. "symbol btc_usdt"), do set_symbol/set_leverage FIRST, do not scan instead. Never need 10 repeats.
+- SIZING MATH (memorize, never violate):
+  * order_notional = contracts x price x contractSize. ONLY this number is compared to min_notional. NEVER compare wallet balance to min_notional - they are different things.
+  * max_notional_you_can_open = tradable_balance x margin_amount_pct% x leverage. Example: 2 USDT x 25% x 75 = ~38 USDT notional, which passes a 5 USDT minimum easily.
+  * If estimate_trade says YES, the trade fits - open it. If it says NO, quote its reason. Never invent your own math, never demand deposits.
 - Language: respond in same language as user (Finglish/Persian/English).
 """
+
+# User message must explicitly mention settings before the agent may touch
+# them in chat (user complaint: agent scrambled config on its own).
+_SETTINGS_KEYWORDS = (
+    "symbol", "leverage", "margin", "timeframe", "timeframes",
+    "cooldown", "min_confidence", "tf_min", "min_agree", "max_positions",
+    "reversal", "breakeven", "trailing", "scan_interval", "guard_interval",
+    "report_interval", "risk_pct", "position_mode", "margin_mode",
+    "set_setting", "set_leverage", "set_symbol", "reset_cooldown",
+    "bezar", "بذار", "بزار", "avaz", "عوض", "taghir", "تغییر",
+)
+
+
+def _user_wants_settings_change(user_message: str) -> bool:
+    msg = (user_message or "").lower()
+    return any(k in msg for k in _SETTINGS_KEYWORDS)
 
 class Agent:
     def __init__(self, trader, memory, brain):
@@ -68,6 +89,9 @@ class Agent:
 
     def chat(self, user_message: str) -> str:
         """Chat with agent - full ReAct loop with tool calling."""
+        # Settings tools only fire when the USER explicitly asked for a
+        # settings change. Otherwise the agent must never touch config.
+        allow_settings = _user_wants_settings_change(user_message)
         self.memory.add_chat_message("user", user_message)
         context_summary = self.memory.get_trade_summary_for_ai()
         ai_ctx = self.memory.get_ai_context()
@@ -112,7 +136,8 @@ class Agent:
             })
 
             for tc in tool_calls:
-                result = self.tools.execute(tc["name"], tc["arguments"])
+                result = self.tools.execute(tc["name"], tc["arguments"],
+                                            allow_settings=allow_settings)
                 logger.info(f"Agent step {step} tool {tc['name']}({tc['arguments']}) -> {result[:200]}")
                 messages.append({
                     "role": "tool",
