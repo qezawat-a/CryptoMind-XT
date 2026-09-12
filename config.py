@@ -82,6 +82,8 @@ class Config:
     REVERSAL_CONFIDENCE: int = 79
     # How often (seconds) to push a PnL + confidence report even with no events.
     REPORT_INTERVAL_SEC: int = 30
+    # Mid-position management loop (breakeven/trailing guardian), seconds.
+    MID_MANAGE_INTERVAL_SEC: int = 15
 
     @classmethod
     def get_effective_provider(cls) -> str:
@@ -167,6 +169,7 @@ class Config:
             "reversal_enabled": cls.REVERSAL_ENABLED,
             "reversal_confidence": cls.REVERSAL_CONFIDENCE,
             "report_interval_sec": cls.REPORT_INTERVAL_SEC,
+            "mid_manage_interval_sec": cls.MID_MANAGE_INTERVAL_SEC,
         }
 
     # Keys that are legacy (removed from default_settings) and should be auto-deleted from DB

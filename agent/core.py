@@ -46,7 +46,8 @@ _SETTINGS_KEYWORDS = (
     "symbol", "leverage", "margin", "timeframe", "timeframes",
     "cooldown", "min_confidence", "tf_min", "min_agree", "max_positions",
     "reversal", "breakeven", "trailing", "scan_interval", "guard_interval",
-    "report_interval", "risk_pct", "position_mode", "margin_mode",
+    "report_interval", "mid_manage", "mid-manage", "midmanage",
+    "risk_pct", "position_mode", "margin_mode",
     "set_setting", "set_leverage", "set_symbol", "reset_cooldown",
     "bezar", "بذار", "بزار", "avaz", "عوض", "taghir", "تغییر",
 )
