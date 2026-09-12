@@ -28,17 +28,21 @@ class EMAStrategy(StrategyBase):
         df["ema_diff"] = df["ema_fast"] - df["ema_slow"]
         prev_diff = df["ema_diff"].iloc[-2]
         curr_diff = df["ema_diff"].iloc[-1]
+        price = max(df["close"].iloc[-1], 0.01)
+        strength = min(100, abs(curr_diff) / price * 10000)
+        # Always-on lean: EMA always has an opinion (which side of the cross
+        # it's on), even when there's no fresh cross event. Display-only.
+        lean = "LONG" if curr_diff > 0 else ("SHORT" if curr_diff < 0 else "NEUTRAL")
+        base = {"fast": df["ema_fast"].iloc[-1], "slow": df["ema_slow"].iloc[-1],
+                "lean": lean,
+                "lean_conf": 0 if lean == "NEUTRAL" else max(1, min(99, int(strength)))}
         if prev_diff < 0 and curr_diff > 0:
-            strength = min(100, abs(curr_diff) / max(df["close"].iloc[-1], 0.01) * 10000)
-            return "LONG", self._confidence(strength), {
-                "fast": df["ema_fast"].iloc[-1], "slow": df["ema_slow"].iloc[-1]
-            }
+            conf = self._confidence(strength)
+            return "LONG", conf, {**base, "lean": "LONG", "lean_conf": conf}
         elif prev_diff > 0 and curr_diff < 0:
-            strength = min(100, abs(curr_diff) / max(df["close"].iloc[-1], 0.01) * 10000)
-            return "SHORT", self._confidence(strength), {
-                "fast": df["ema_fast"].iloc[-1], "slow": df["ema_slow"].iloc[-1]
-            }
-        return "NEUTRAL", 0, {}
+            conf = self._confidence(strength)
+            return "SHORT", conf, {**base, "lean": "SHORT", "lean_conf": conf}
+        return "NEUTRAL", 0, base
 
     def _confidence(self, strength: float) -> int:
         return min(95, int(60 + strength * 2))
@@ -67,27 +71,33 @@ class MACDStrategy(StrategyBase):
         df["histogram"] = df["macd"] - df["signal"]
         prev_hist = df["histogram"].iloc[-2]
         curr_hist = df["histogram"].iloc[-1]
+        close_px = abs(df["close"].iloc[-1])
+        # Always-on lean: histogram side is MACD's standing opinion.
+        lean = "LONG" if curr_hist > 0 else ("SHORT" if curr_hist < 0 else "NEUTRAL")
+        lean_conf = 0 if lean == "NEUTRAL" else max(1, min(99, int(min(100, abs(curr_hist) / close_px * 50000))))
         if curr_hist > 0 and prev_hist < 0:
             strength = min(100, abs(curr_hist) / abs(df["close"].iloc[-1]) * 50000)
-            return "LONG", self._confidence(strength), {
+            conf = self._confidence(strength)
+            return "LONG", conf, {
                 "macd": df["macd"].iloc[-1], "signal": df["signal"].iloc[-1],
-                "histogram": curr_hist
+                "histogram": curr_hist, "lean": "LONG", "lean_conf": conf,
             }
         elif curr_hist < 0 and prev_hist > 0:
             strength = min(100, abs(curr_hist) / abs(df["close"].iloc[-1]) * 50000)
-            return "SHORT", self._confidence(strength), {
+            conf = self._confidence(strength)
+            return "SHORT", conf, {
                 "macd": df["macd"].iloc[-1], "signal": df["signal"].iloc[-1],
-                "histogram": curr_hist
+                "histogram": curr_hist, "lean": "SHORT", "lean_conf": conf,
             }
         if curr_hist > 0 and prev_hist > 0 and df["macd"].iloc[-1] > df["macd"].iloc[-2]:
             trend_strength = abs(df["macd"].iloc[-1]) / abs(df["close"].iloc[-1]) * 10000
             conf = min(85, int(55 + trend_strength))
-            return "LONG", conf, {}
+            return "LONG", conf, {"lean": "LONG", "lean_conf": conf}
         elif curr_hist < 0 and prev_hist < 0 and df["macd"].iloc[-1] < df["macd"].iloc[-2]:
             trend_strength = abs(df["macd"].iloc[-1]) / abs(df["close"].iloc[-1]) * 10000
             conf = min(85, int(55 + trend_strength))
-            return "SHORT", conf, {}
-        return "NEUTRAL", 0, {}
+            return "SHORT", conf, {"lean": "SHORT", "lean_conf": conf}
+        return "NEUTRAL", 0, {"lean": lean, "lean_conf": lean_conf}
 
     def _confidence(self, strength: float) -> int:
         # Crossover confidence. strength is already capped at 100 by the caller
@@ -124,19 +134,28 @@ class RSIStrategy(StrategyBase):
         curr_rsi = df["rsi"].iloc[-1]
         if prev_rsi < self.oversold and curr_rsi > self.oversold:
             strength = min(100, (curr_rsi - self.oversold) * 2)
-            return "LONG", self._confidence(strength), {"rsi": curr_rsi}
+            conf = self._confidence(strength)
+            return "LONG", conf, {"rsi": curr_rsi, "lean": "LONG", "lean_conf": conf}
         elif prev_rsi > self.overbought and curr_rsi < self.overbought:
             strength = min(100, (self.overbought - curr_rsi) * 2)
-            return "SHORT", self._confidence(strength), {"rsi": curr_rsi}
+            conf = self._confidence(strength)
+            return "SHORT", conf, {"rsi": curr_rsi, "lean": "SHORT", "lean_conf": conf}
         elif curr_rsi < self.oversold:
             strength = min(100, (self.oversold - curr_rsi) * 2)
-            return "LONG", self._confidence(strength) - 10, {"rsi": curr_rsi}
+            conf = self._confidence(strength) - 10
+            return "LONG", conf, {"rsi": curr_rsi, "lean": "LONG", "lean_conf": conf}
         elif curr_rsi > self.overbought:
             strength = min(100, (curr_rsi - self.overbought) * 2)
-            return "SHORT", self._confidence(strength) - 10, {"rsi": curr_rsi}
+            conf = self._confidence(strength) - 10
+            return "SHORT", conf, {"rsi": curr_rsi, "lean": "SHORT", "lean_conf": conf}
         # Mid-zone: silent, but ALWAYS pass the value through so every
-        # scan/report can display RSI next to each timeframe.
-        return "NEUTRAL", 0, {"rsi": curr_rsi}
+        # scan/report can display RSI next to each timeframe. Lean points
+        # counter-trend (this bot's philosophy): below 50 leans LONG.
+        lean = "LONG" if curr_rsi < 50 else ("SHORT" if curr_rsi > 50 else "NEUTRAL")
+        return "NEUTRAL", 0, {
+            "rsi": curr_rsi, "lean": lean,
+            "lean_conf": 0 if lean == "NEUTRAL" else max(1, min(90, int(abs(curr_rsi - 50) * 1.8))),
+        }
 
     def _confidence(self, strength: float) -> int:
         return min(90, int(60 + strength * 1.5))
@@ -164,23 +183,32 @@ class MomentumStrategy(StrategyBase):
         vol_surge = current_vol > avg_vol * 1.2 if avg_vol > 0 else False
         curr_mom = df["momentum"].iloc[-1]
         prev_mom = df["momentum"].iloc[-2]
+        # Always-on lean: momentum sign is the standing opinion.
+        lean = "LONG" if curr_mom > 0 else ("SHORT" if curr_mom < 0 else "NEUTRAL")
+        lean_conf = 0 if lean == "NEUTRAL" else max(1, min(99, int(min(100, abs(curr_mom) * 800))))
         if curr_mom > self.threshold and prev_mom < self.threshold and vol_surge:
             strength = min(100, abs(curr_mom) * 1000)
-            return "LONG", self._confidence(strength), {
-                "momentum": curr_mom, "vol_ratio": current_vol / avg_vol if avg_vol > 0 else 1
+            conf = self._confidence(strength)
+            return "LONG", conf, {
+                "momentum": curr_mom, "vol_ratio": current_vol / avg_vol if avg_vol > 0 else 1,
+                "lean": "LONG", "lean_conf": conf,
             }
         elif curr_mom < -self.threshold and prev_mom > -self.threshold and vol_surge:
             strength = min(100, abs(curr_mom) * 1000)
-            return "SHORT", self._confidence(strength), {
-                "momentum": curr_mom, "vol_ratio": current_vol / avg_vol if avg_vol > 0 else 1
+            conf = self._confidence(strength)
+            return "SHORT", conf, {
+                "momentum": curr_mom, "vol_ratio": current_vol / avg_vol if avg_vol > 0 else 1,
+                "lean": "SHORT", "lean_conf": conf,
             }
         if curr_mom > self.threshold:
             strength = min(100, abs(curr_mom) * 800)
-            return "LONG", self._confidence(strength) - 15, {"momentum": curr_mom}
+            conf = self._confidence(strength) - 15
+            return "LONG", conf, {"momentum": curr_mom, "lean": "LONG", "lean_conf": conf}
         elif curr_mom < -self.threshold:
             strength = min(100, abs(curr_mom) * 800)
-            return "SHORT", self._confidence(strength) - 15, {"momentum": curr_mom}
-        return "NEUTRAL", 0, {}
+            conf = self._confidence(strength) - 15
+            return "SHORT", conf, {"momentum": curr_mom, "lean": "SHORT", "lean_conf": conf}
+        return "NEUTRAL", 0, {"momentum": curr_mom, "lean": lean, "lean_conf": lean_conf}
 
     def _confidence(self, strength: float) -> int:
         return min(90, int(55 + strength * 2))
@@ -210,8 +238,11 @@ class StrategyEngine:
     def get_consensus(self, df: pd.DataFrame, min_confidence: int = 80,
                       min_agree: int = 2) -> dict:
         results = self.calculate_all(df)
-        long_signals = [r for r in results if r["direction"] == "LONG" and r["confidence"] >= min_confidence]
-        short_signals = [r for r in results if r["direction"] == "SHORT" and r["confidence"] >= min_confidence]
+        # Gate: only confident signals vote - EXCEPT RSI, which always votes
+        # when extreme (see RSI-FIRST below). A 70-gate must never silence
+        # an overbought/oversold RSI into "nothing".
+        long_signals = [r for r in results if r["direction"] == "LONG" and (r["confidence"] >= min_confidence or r["strategy"] == "RSI")]
+        short_signals = [r for r in results if r["direction"] == "SHORT" and (r["confidence"] >= min_confidence or r["strategy"] == "RSI")]
 
         # RSI veto: if RSI is overbought (>70) don't LONG, if oversold (<30) don't SHORT
         # RSI is the first filter - even if 4 strategies agree LONG but RSI says overbought, veto
@@ -233,12 +264,14 @@ class StrategyEngine:
         short_score = sum(r["confidence"] for r in short_signals)
         total_score = long_score + short_score
 
-        # RSI-FIRST: RSI has the first word. If it fires (>= min_confidence),
-        # its side alone decides - the opposite side is discarded even if 2+
-        # strategies agree against it. RSI needs no second vote.
+        # RSI-FIRST: RSI has the first word. Whenever RSI is in an extreme
+        # state (overbought -> SHORT, oversold -> LONG) its side alone
+        # decides - NO confidence gate for RSI. An extreme RSI with conf 56
+        # still outvotes everything; even if all other strategies agree
+        # against it. RSI needs no second vote. (Mid-zone RSI stays silent
+        # and votes nothing - only extreme states fire directionally.)
         rsi_vote = None
-        if (rsi_entry and rsi_entry.get("direction") in ("LONG", "SHORT")
-                and rsi_entry.get("confidence", 0) >= min_confidence):
+        if rsi_entry and rsi_entry.get("direction") in ("LONG", "SHORT"):
             rsi_vote = rsi_entry["direction"]
             if rsi_vote == "LONG":
                 short_signals = []

@@ -232,40 +232,98 @@ class SignalScanner:
                 )
         return result
 
+    @staticmethod
+    def _lean_token(sig: dict, counted: set) -> str:
+        """One strategy's standing opinion, e.g. EMA=SHORT(23%)* (*=counted)."""
+        name = sig.get("strategy", "?")
+        det = sig.get("details", {}) or {}
+        mark = "*" if (sig.get("direction") in ("LONG", "SHORT")
+                       and name in counted) else ""
+        if name == "RSI" and det.get("rsi") is not None:
+            if det.get("lean") and det["lean"] != "NEUTRAL":
+                return f"RSI:{det['rsi']:.1f} {det['lean']}({det.get('lean_conf', 0)}%){mark}"
+            return f"RSI:{det['rsi']:.1f}{mark}"
+        if det.get("lean") and det["lean"] != "NEUTRAL":
+            return f"{name}={det['lean']}({det.get('lean_conf', 0)}%){mark}"
+        if sig.get("direction") in ("LONG", "SHORT"):
+            return f"{name}={sig['direction']}({sig.get('confidence', 0)}%){mark}"
+        if not det:
+            return f"{name}=n/a"
+        return f"{name}=flat"
+
+    def _format_tf_line(self, r: dict) -> str:
+        counted = set(r.get("strategies_used", []))
+        sigs = r.get("all_signals", []) or []
+        toks = [self._lean_token(s, counted) for s in sigs]
+        if r["direction"] != "NEUTRAL":
+            return f"{r['direction']} ({r['confidence']}%) [{' | '.join(toks)}]"
+        leans = [(s["details"].get("lean_conf", 0), s["details"].get("lean"), s.get("strategy", "?"))
+                 for s in sigs
+                 if (s.get("details", {}) or {}).get("lean") not in (None, "NEUTRAL")]
+        if leans:
+            conf, side, name = max(leans)
+            return f"NEUTRAL (lean {side} {conf}% via {name}) [{' | '.join(toks)}]"
+        return f"NEUTRAL (flat) [{' | '.join(toks)}]"
+
+    @staticmethod
+    def _top_lean(tfs: dict):
+        """Strongest opinion anywhere: (conf, source, side) or None."""
+        best = None
+        for tf, r in (tfs or {}).items():
+            if r.get("error"):
+                continue
+            if r.get("direction") in ("LONG", "SHORT"):
+                cand = (r.get("confidence", 0), f"{tf} TF vote", r["direction"])
+                if best is None or cand[0] > best[0]:
+                    best = cand
+            for s in r.get("all_signals", []) or []:
+                det = s.get("details", {}) or {}
+                if det.get("lean") not in (None, "NEUTRAL"):
+                    cand = (det.get("lean_conf", 0), f"{tf} {s.get('strategy', '?')}", det["lean"])
+                    if best is None or cand[0] > best[0]:
+                        best = cand
+        return best
+
     def format_signal_report(self, result: dict) -> str:
         if "error" in result and "direction" not in result:
             return f"Signal Scan Error: {result['error']}"
         report = f"=== SIGNAL SCAN [{result.get('symbol', 'N/A')}] ===\n"
         if result.get("veto_1m"):
             report += f"VETO: {result['veto_1m']}\n"
-        report += f"Direction: {result['direction']}\n"
-        report += f"Confidence: {result['confidence']}%\n"
-        report += f"Signal Strength: {result.get('signal_strength', 0):.2f}\n"
+        if result.get("veto_reason"):
+            report += f"VETO: {result['veto_reason']}\n"
+        tfs = result.get("timeframe_results", {})
+        if result["direction"] != "NEUTRAL":
+            report += f"Direction: {result['direction']}\n"
+            report += f"Confidence: {result['confidence']}%\n"
+            report += f"Signal Strength: {result.get('signal_strength', 0):.2f}\n"
+        else:
+            top = self._top_lean(tfs)
+            if top:
+                report += f"Direction: NEUTRAL (top lean {top[2]} {top[0]}% - {top[1]})\n"
+            else:
+                report += "Direction: NEUTRAL (flat - no lean data)\n"
         report += f"Price: {result.get('price', 0)}\n"
         if result.get("strategies_used"):
             report += f"Strategies: {', '.join(result['strategies_used'])}\n"
-        for tf, r in result.get("timeframe_results", {}).items():
+        else:
+            gate = int(self.memory.get_setting("tf_min_confidence", Config.TF_MIN_CONFIDENCE))
+            report += f"Strategies: none counted (all below {gate}% gate - leans per TF below)\n"
+        for tf, r in tfs.items():
             if r.get("error"):
                 report += f"  {tf}: no data ({r['error']})\n"
                 continue
-            rsi_txt = (f"RSI: {r['rsi']:.1f}" if r.get("rsi") is not None
-                       else "RSI: n/a")
-            gate = int(self.memory.get_setting("tf_min_confidence", Config.TF_MIN_CONFIDENCE))
-            fired, below_gate = [], []
-            for s in r.get("all_signals", []):
-                if s["direction"] == "NEUTRAL":
-                    continue
-                entry = f"{s['strategy']}={s['direction']}({s['confidence']}%)"
-                (below_gate if s["confidence"] < gate else fired).append(entry)
+            report += f"  {tf}: {self._format_tf_line(r)}\n"
+        if (result.get("voted_weight") or 0) > 0:
+            longs = result.get('long_weight', 0)
+            shorts = result.get('short_weight', 0)
             parts = []
-            if fired:
-                parts.append(", ".join(fired))
-            if below_gate:
-                parts.append(f"below {gate}% gate: {', '.join(below_gate)}")
-            if not parts:
-                parts.append("no strategy fired")
-            report += f"  {tf}: {r['direction']} ({r['confidence']}%) [{rsi_txt} | {' | '.join(parts)}]\n"
-        report += (f"\nLong: {result.get('long_weight', 0):.2f} | "
-                   f"Short: {result.get('short_weight', 0):.2f} | "
-                   f"Voted: {result.get('voted_weight', 0):.2f}")
+            parts.append(f"Long: {longs:.2f}" if longs > 0 else "no LONG votes")
+            parts.append(f"Short: {shorts:.2f}" if shorts > 0 else "no SHORT votes")
+            parts.append(f"Voted: {result.get('voted_weight', 0):.2f}")
+            report += "\n" + " | ".join(parts)
+        else:
+            report += "\nNo counted votes - every TF below gate (see leans above)."
+        if "*" in report:
+            report += "\n(* = counted vote)"
         return report
