@@ -30,7 +30,7 @@ class Config:
 
     # Agent behavior
     AGENT_MAX_STEPS: int = int(os.getenv("AGENT_MAX_STEPS", "8"))
-    AGENT_AUTONOMOUS_INTERVAL_SEC: int = int(os.getenv("AGENT_AUTONOMOUS_INTERVAL_SEC", "60"))
+    AGENT_AUTONOMOUS_INTERVAL_SEC: int = int(os.getenv("AGENT_AUTONOMOUS_INTERVAL_SEC", "15"))
     AGENT_DRY_RUN: str = os.getenv("AGENT_DRY_RUN", "false").lower()  # true = agent analyzes but does not open trades
 
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -81,7 +81,7 @@ class Config:
     REVERSAL_ENABLED: bool = True
     REVERSAL_CONFIDENCE: int = 79
     # How often (seconds) to push a PnL + confidence report even with no events.
-    REPORT_INTERVAL_SEC: int = 60
+    REPORT_INTERVAL_SEC: int = 30
 
     @classmethod
     def get_effective_provider(cls) -> str:

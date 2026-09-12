@@ -633,7 +633,7 @@ class XTTrader:
     # the threshold the stop is moved on the very next check, so a smaller
     # value reacts faster (trading on 1m/5m at high leverage wants seconds,
     # not minutes). Floor of 15s matches the guard loop cadence.
-    MID_MANAGE_DEFAULT_INTERVAL_SEC = 30
+    MID_MANAGE_DEFAULT_INTERVAL_SEC = 15
 
     def start_mid_manager(self) -> bool:
         """Start the always-on mid-management guardian.

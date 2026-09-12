@@ -388,7 +388,7 @@ def main():
                         trader.check_positions_for_close()
                         res = agent.autonomous_tick()
                         logger.info(f"AGENT AUTONOMOUS: {res[:500]}")
-                        # Periodic status report (report_interval_sec) - so user gets status every 60s even without trade
+                        # Periodic status report (report_interval_sec) - so user gets status every 30s even without trade
                         try:
                             interval = int(memory.get_setting("report_interval_sec", Config.REPORT_INTERVAL_SEC))
                             now = time.time()

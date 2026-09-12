@@ -178,6 +178,20 @@ class SignalScanner:
             win_conf = winner / voted_weight if voted_weight else 0.0
             confidence = int(alignment * (60 + 40 * win_conf))
 
+        # 1m CIRCUIT BREAKER: 15m votes on candles that closed up to 15 min
+        # ago. In a vertical spike + dump the 1m already screams the opposite
+        # while 15m still shows the old pump (e.g. lab LONG 92% at the top,
+        # stopped seconds later). If 1m opposes overall at >= min_confidence,
+        # block the entry - do not buy a dump, do not short a rip.
+        veto_1m = None
+        if overall != "NEUTRAL":
+            r1 = all_results.get("1m") or {}
+            d1, c1 = r1.get("direction"), r1.get("confidence", 0)
+            if d1 and d1 != "NEUTRAL" and d1 != overall and c1 >= min_confidence:
+                veto_1m = (f"1m {d1} {c1}% opposes {overall} - entry blocked "
+                           f"(fast reversal in progress)")
+                overall = "NEUTRAL"
+
         return {
             "direction": overall,
             "confidence": confidence,
@@ -187,6 +201,7 @@ class SignalScanner:
             "long_weight": long_weight,
             "short_weight": short_weight,
             "voted_weight": voted_weight,
+            "veto_1m": veto_1m,
         }
 
     def scan_and_report(self, symbol: str = None) -> dict:
@@ -221,6 +236,8 @@ class SignalScanner:
         if "error" in result and "direction" not in result:
             return f"Signal Scan Error: {result['error']}"
         report = f"=== SIGNAL SCAN [{result.get('symbol', 'N/A')}] ===\n"
+        if result.get("veto_1m"):
+            report += f"VETO: {result['veto_1m']}\n"
         report += f"Direction: {result['direction']}\n"
         report += f"Confidence: {result['confidence']}%\n"
         report += f"Signal Strength: {result.get('signal_strength', 0):.2f}\n"
