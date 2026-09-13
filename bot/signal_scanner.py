@@ -192,12 +192,10 @@ class SignalScanner:
                            f"(fast reversal in progress)")
                 overall = "NEUTRAL"
 
-        # RSI-FORCE (user principle, FINAL word): any timeframe with an
-        # extreme RSI forces the OVERALL direction - even against all other
-        # timeframes and even after the 1m breaker. Among opposing extremes
-        # the winner is max(TF_weight * |rsi-50|). Confidence stays HONEST
-        # (low when overruled TFs oppose) so the 80 money gate still
-        # protects entries - only the DIRECTION is forced.
+        # RSI-FORCE (ba min_agree MTF): ye TF tanhayi ba extreme RSI
+        # overall ro overrule NEMIKONE. Force faghat vaghti emal mishe ke
+        # hadeaghal 2 TF (min_agree MTF) ham-samt RSI-vote dashte bashan.
+        # Yedune TF overbought (masalan faghat 1m) hame ra SHORT nemikone.
         rsi_force = None
         cands = []
         for tf, r in all_results.items():
@@ -216,9 +214,24 @@ class SignalScanner:
                 rv = float(det["rsi"])
                 cands.append((TF_WEIGHTS.get(tf, 1.0) * abs(rv - 50),
                               tf, rv, r["direction"]))
+        # Count TFs per side that carry an RSI vote: force needs min_agree.
         if cands:
+            from collections import Counter
+            side_tf_count = Counter(side for _, _, _, side in cands)
             _, ftf, frsi, fside = max(cands)
-            if overall != fside:
+            n_side_tfs = side_tf_count.get(fside, 0)
+            mtf_min_agree = 2
+            try:
+                mtf_min_agree = max(2, int(self.memory.get_setting(
+                    "min_agreeing_strategies",
+                    Config.MIN_AGREEING_STRATEGIES)))
+            except Exception:
+                mtf_min_agree = 2
+            if n_side_tfs < mtf_min_agree:
+                # Faghat 1 TF extreme - force nemishe, faghat report.
+                # overall hamun MTF vote mimune.
+                rsi_force = None
+            elif overall != fside:
                 prev = overall
                 overall = fside
                 total_w = sum(TF_WEIGHTS.get(t, 1.0) for t in intervals)

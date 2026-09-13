@@ -258,12 +258,11 @@ class StrategyEngine:
         short_score = sum(r["confidence"] for r in short_signals)
         total_score = long_score + short_score
 
-        # RSI-FIRST: RSI has the first word. Whenever RSI is in an extreme
-        # state (overbought -> SHORT, oversold -> LONG) its side alone
-        # decides - NO confidence gate for RSI. An extreme RSI with conf 56
-        # still outvotes everything; even if all other strategies agree
-        # against it. RSI needs no second vote. (Mid-zone RSI stays silent
-        # and votes nothing - only extreme states fire directionally.)
+        # RSI-FIRST (ba min_agree): RSI extreme tanhayi direction nemide.
+        # RSI ham mesle baghie bayad min_agree ro begire: yani tu har TF
+        # baraye LONG bayad hadeaghal min_agree vote ru samt LONG bashe
+        # (khode RSI + hadeaghal 1 strategy dige), va baraye SHORT hamintor.
+        # Ye RSI tanhayi (bedune hamrah) TF ro set nemikone.
         rsi_vote = None
         if rsi_entry and rsi_entry.get("direction") in ("LONG", "SHORT"):
             rsi_vote = rsi_entry["direction"]
@@ -276,15 +275,14 @@ class StrategyEngine:
         # old count vote, SHORT(85) and LONG(66) tied 1:1 and the entire
         # timeframe was discarded as NEUTRAL despite a clear stronger side.
         #
-        # BUT (when RSI is silent) a single strategy firing alone is no longer
-        # enough: one noisy indicator on one timeframe (e.g. MOMENTUM
-        # continuation on 1m noise) used to open trades by itself ->
-        # instant losses. Require min_agree strategies on the winning side
-        # before the timeframe votes at all.
-        if rsi_vote == "LONG" and long_signals:
+        # Hame (RSI ham) bayad min_agree strategy ru samt barande dashte
+        # bashan: ye indicator tanhayi ru noise 1m trade baz nemikone.
+        # RSI extreme ham az in ghaede mostasna nist - faghat 1 vote hesab
+        # mishe, na kol TF.
+        if rsi_vote == "LONG" and len(long_signals) >= min_agree:
             direction = "LONG"
             strategies_used = [r["strategy"] for r in long_signals]
-        elif rsi_vote == "SHORT" and short_signals:
+        elif rsi_vote == "SHORT" and len(short_signals) >= min_agree:
             direction = "SHORT"
             strategies_used = [r["strategy"] for r in short_signals]
         elif rsi_vote is None:

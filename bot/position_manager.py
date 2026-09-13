@@ -84,13 +84,55 @@ class PositionManager:
             logger.warning(f"Mark price fallback failed for {symbol}: {e}")
             return 0.0
 
+    def _pnl_from_exchange(self, pos: dict, symbol: str, position_side: str,
+                           entry: float, mark: float, size: float,
+                           leverage: int) -> tuple:
+        """Return (pnl, pnl_source, contract_size).
+
+        Priority: exchange floatingPL/unrealizedProfit/profit field.
+        Fallback: price_diff * size * contractSize ONLY when exchange PnL is
+        missing/zero but price actually moved (some symbols like uai_usdt
+        return floatingPL=0). Fee/funding note: XT floatingPL is GROSS
+        (fees/funding excluded), so realized PnL stored at close is also
+        gross. /pnl labels it accordingly - never mix with wallet balance
+        diff which includes fees.
+        """
+        raw_keys = ("floatingPL", "unrealizedProfit", "profit")
+        raw_pnl = 0.0
+        raw_key = None
+        for k in raw_keys:
+            try:
+                v = float(pos.get(k) or 0)
+            except (TypeError, ValueError):
+                continue
+            if abs(v) > 1e-12:
+                raw_pnl = v
+                raw_key = k
+                break
+        cs = self.risk.get_contract_size(symbol) or 1.0
+        roi = 0.0
+        if entry > 0 and mark > 0:
+            move = (mark - entry) / entry
+            if position_side == "SHORT":
+                move = -move
+            roi = move * leverage * 100
+        if raw_key is not None:
+            return raw_pnl, f"exchange:{raw_key}", cs, roi
+        # Exchange PnL missing/zero: estimate from price diff, but NEVER
+        # silently mix. Caller labels it estimated.
+        if abs(roi) > 0.1 and size > 0 and cs > 0 and entry > 0 and mark > 0:
+            price_diff = (mark - entry) if position_side == "LONG" else (entry - mark)
+            return price_diff * size * cs, "estimated:price_diff*size*cs", cs, roi
+        return 0.0, "exchange:zero", cs, roi
+
     def get_position_pnl(self, symbol: str, position_side: str) -> dict:
         pos = self.get_position(symbol, position_side)
         if not pos:
             return {"exists": False, "unrealized_pnl": 0.0, "roi": 0.0,
                     "entry_price": 0.0, "mark_price": 0.0, "leverage": 1,
                     "position_size": 0, "margin": 0.0, "profit_id": None,
-                    "trigger_profit_price": 0.0, "trigger_stop_price": 0.0}
+                    "trigger_profit_price": 0.0, "trigger_stop_price": 0.0,
+                    "pnl_source": "none"}
         entry = float(pos.get("entryPrice") or 0)
         mark = float(pos.get("calMarkPrice") or 0)
         if mark <= 0:
@@ -99,26 +141,18 @@ class PositionManager:
             mark = self._public_mark_price(symbol)
         size = float(pos.get("positionSize") or 0)
         leverage = int(float(pos.get("leverage") or 1))
-        # floatingPL is often 0/missing on XT for some symbols (e.g. uai_usdt) - calculate from price diff
-        raw_pnl = float(pos.get("floatingPL") or pos.get("unrealizedProfit") or pos.get("profit") or 0)
         margin = float(pos.get("isolatedMargin") or 0)
-        cs = self.risk.get_contract_size(symbol) or 1.0
-        # ROI on margin: price move as a fraction of entry, amplified by leverage.
-        roi = 0.0
-        if entry > 0 and mark > 0:
-            move = (mark - entry) / entry
-            if position_side == "SHORT":
-                move = -move
-            roi = move * leverage * 100
-        # Fallback PnL calc if exchange returns 0 but ROI is clearly non-zero (bug for uai_usdt)
-        pnl = raw_pnl
-        if abs(pnl) < 1e-9 and abs(roi) > 0.1 and size > 0 and cs > 0:
-            # PnL = price_diff * size * contractSize
-            price_diff = (mark - entry) if position_side == "LONG" else (entry - mark)
-            pnl = price_diff * size * cs
+        pnl, pnl_source, cs, roi = self._pnl_from_exchange(
+            pos, symbol, position_side, entry, mark, size, leverage)
+        if pnl_source.startswith("estimated"):
+            logger.warning(
+                f"{symbol} {position_side}: exchange PnL missing/zero "
+                f"(entry={entry} mark={mark} size={size} cs={cs}) - "
+                f"using estimated PnL={pnl:.4f}. Check contractSize mapping.")
         return {
             "exists": True,
             "unrealized_pnl": pnl,
+            "pnl_source": pnl_source,
             "roi": roi,
             "entry_price": entry,
             "mark_price": mark,
@@ -126,6 +160,7 @@ class PositionManager:
             "position_size": size,
             "position_value": size * cs * mark,
             "margin": margin,
+            "pnl_source": pnl_source,
             "profit_id": pos.get("profitId") or None,
             "trigger_profit_price": float(pos.get("triggerProfitPrice") or 0),
             "trigger_stop_price": float(pos.get("triggerStopPrice") or 0),
@@ -173,29 +208,21 @@ class PositionManager:
             return {"exists": False, "unrealized_pnl": 0.0, "roi": 0.0,
                     "entry_price": 0.0, "mark_price": 0.0, "leverage": 1,
                     "position_size": 0, "margin": 0.0, "profit_id": None,
-                    "trigger_profit_price": 0.0, "trigger_stop_price": 0.0}
+                    "trigger_profit_price": 0.0, "trigger_stop_price": 0.0,
+                    "pnl_source": "none"}
         entry = float(pos.get("entryPrice") or 0)
         mark = float(pos.get("calMarkPrice") or 0)
         if mark <= 0:
             mark = self._public_mark_price(symbol)
         size = float(pos.get("positionSize") or 0)
         leverage = int(float(pos.get("leverage") or 1))
-        raw_pnl = float(pos.get("floatingPL") or pos.get("unrealizedProfit") or pos.get("profit") or 0)
         margin = float(pos.get("isolatedMargin") or 0)
-        cs = self.risk.get_contract_size(symbol) or 1.0
-        roi = 0.0
-        if entry > 0 and mark > 0:
-            move = (mark - entry) / entry
-            if position_side == "SHORT":
-                move = -move
-            roi = move * leverage * 100
-        pnl = raw_pnl
-        if abs(pnl) < 1e-9 and abs(roi) > 0.1 and size > 0 and cs > 0:
-            price_diff = (mark - entry) if position_side == "LONG" else (entry - mark)
-            pnl = price_diff * size * cs
+        pnl, pnl_source, cs, roi = self._pnl_from_exchange(
+            pos, symbol, position_side, entry, mark, size, leverage)
         return {
             "exists": True,
             "unrealized_pnl": pnl,
+            "pnl_source": pnl_source,
             "roi": roi,
             "entry_price": entry,
             "mark_price": mark,
