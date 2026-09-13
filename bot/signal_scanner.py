@@ -204,9 +204,10 @@ class SignalScanner:
             if r.get("direction") not in ("LONG", "SHORT"):
                 continue
             # Candidate = this TF followed an RSI vote. The strategy's fired
-            # direction IS the extreme-state definition (a fresh cross-down
-            # fires SHORT at rsi 69.x - still an RSI regime TF). Thresholds
-            # live only in RSIStrategy; never re-derive them here.
+            # direction IS the extreme-state definition (now only >70 / <30:
+            # RSIStrategy is silent in mid-zone, so an RSI direction here can
+            # only come from a real extreme). Thresholds live only in
+            # RSIStrategy; never re-derive them here.
             sigs = r.get("all_signals", []) or []
             rsi_sig = next((s for s in sigs if s.get("strategy") == "RSI"), None)
             det = (rsi_sig.get("details", {}) or {}) if rsi_sig else {}

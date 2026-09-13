@@ -130,32 +130,26 @@ class RSIStrategy(StrategyBase):
         avg_loss = loss.ewm(alpha=1 / self.period, adjust=False).mean()
         rs = avg_gain / avg_loss.replace(0, 1e-10)
         df["rsi"] = 100 - (100 / (1 + rs))
-        prev_rsi = df["rsi"].iloc[-2]
-        curr_rsi = df["rsi"].iloc[-1]
-        if prev_rsi < self.oversold and curr_rsi > self.oversold:
-            strength = min(100, (curr_rsi - self.oversold) * 2)
-            conf = self._confidence(strength)
-            return "LONG", conf, {"rsi": curr_rsi, "lean": "LONG", "lean_conf": conf}
-        elif prev_rsi > self.overbought and curr_rsi < self.overbought:
-            strength = min(100, (self.overbought - curr_rsi) * 2)
-            conf = self._confidence(strength)
-            return "SHORT", conf, {"rsi": curr_rsi, "lean": "SHORT", "lean_conf": conf}
-        elif curr_rsi < self.oversold:
-            strength = min(100, (self.oversold - curr_rsi) * 2)
-            conf = self._confidence(strength) - 10
-            return "LONG", conf, {"rsi": curr_rsi, "lean": "LONG", "lean_conf": conf}
-        elif curr_rsi > self.overbought:
+        curr_rsi = float(df["rsi"].iloc[-1])
+        # RSI does one job and one job only: it fires at the extremes.
+        #   RSI > overbought (70) -> SHORT   (overbought, mean-reversion short)
+        #   RSI < oversold   (30) -> LONG    (oversold, mean-reversion long)
+        # Anywhere between 30 and 70 RSI is SILENT: no direction, no lean, no
+        # vote, never counted. The old mid-zone returned a counter-trend "lean"
+        # (below 50 -> "LONG", above 50 -> "SHORT") with a made-up lean_conf that
+        # leaked into reports and the MTF top-lean search, so a flat 50-55 RSI
+        # could display as an opinion it never had and signals looked swapped.
+        # Only the RSI VALUE travels to the report (display-only) in mid-zone.
+        if curr_rsi > self.overbought:
             strength = min(100, (curr_rsi - self.overbought) * 2)
             conf = self._confidence(strength) - 10
             return "SHORT", conf, {"rsi": curr_rsi, "lean": "SHORT", "lean_conf": conf}
-        # Mid-zone: silent, but ALWAYS pass the value through so every
-        # scan/report can display RSI next to each timeframe. Lean points
-        # counter-trend (this bot's philosophy): below 50 leans LONG.
-        lean = "LONG" if curr_rsi < 50 else ("SHORT" if curr_rsi > 50 else "NEUTRAL")
-        return "NEUTRAL", 0, {
-            "rsi": curr_rsi, "lean": lean,
-            "lean_conf": 0 if lean == "NEUTRAL" else max(1, min(90, int(abs(curr_rsi - 50) * 1.8))),
-        }
+        if curr_rsi < self.oversold:
+            strength = min(100, (self.oversold - curr_rsi) * 2)
+            conf = self._confidence(strength) - 10
+            return "LONG", conf, {"rsi": curr_rsi, "lean": "LONG", "lean_conf": conf}
+        # Silent mid-zone: value passed through for display only.
+        return "NEUTRAL", 0, {"rsi": curr_rsi}
 
     def _confidence(self, strength: float) -> int:
         return min(90, int(60 + strength * 1.5))

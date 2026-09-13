@@ -41,7 +41,11 @@ class Config:
     XT_FUTURES_HOST: str = os.getenv("XT_FUTURES_HOST", "https://fapi.xt.com")
 
     DEFAULT_SYMBOL: str = os.getenv("DEFAULT_SYMBOL", "aero_usdt")
-    DEFAULT_LEVERAGE: int = 75
+    # 20x default: on a pump-style coin (lab_usdt, lsk_usdt) 40-75x puts the
+    # liquidation 1-2.5% away, so the ATR stop sits inside noise and every
+    # wiggle liquidates before the SL can fire (the 21-23s stop-outs). At
+    # 20x the liq is ~5% and the stop has room to breathe.
+    DEFAULT_LEVERAGE: int = 20
     DEFAULT_MARGIN_MODE: str = "CROSSED"  # XT doc: positionType CROSSED/ISOLATED (Change Position Type)
     # Alias for doc - position_type is same as margin_mode, keep both for compat
     DEFAULT_POSITION_TYPE: str = "CROSSED"
@@ -73,7 +77,10 @@ class Config:
     TRAILING_TRIGGER_ROI_PCT: float = 20.0
     TRAILING_DISTANCE_PCT: float = 0.5
 
-    SL_LIQUIDATION_SAFETY: float = 0.5
+    # Max SL distance = liquidation_distance * this factor. 0.5 left only
+    # 1.25% price room at 40x - inside market noise. 0.7 gives the stop room
+    # to actually be usable instead of triggering on dust.
+    SL_LIQUIDATION_SAFETY: float = 0.7
     ON_TPSL_FAILURE: str = "close"
 
     # Close an open position when the opposite-direction signal reaches this
